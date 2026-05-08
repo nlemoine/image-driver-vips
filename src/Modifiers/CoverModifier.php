@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Intervention\Image\Drivers\Vips\Modifiers;
 
+use Intervention\Image\Alignment;
 use Intervention\Image\Drivers\Vips\ColorProcessor;
 use Intervention\Image\Drivers\Vips\Core;
+use Intervention\Image\Drivers\Vips\Source\BufferSource;
+use Intervention\Image\Drivers\Vips\Source\PathSource;
 use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
 use Intervention\Image\Exceptions\ModifierException;
@@ -17,6 +20,8 @@ use Intervention\Image\Interfaces\SpecializedInterface;
 use Intervention\Image\Modifiers\CoverModifier as GenericCoverModifier;
 use Jcupitt\Vips\Exception as VipsException;
 use Jcupitt\Vips\Image as VipsImage;
+use Jcupitt\Vips\Interesting;
+use Jcupitt\Vips\Interpretation;
 
 class CoverModifier extends GenericCoverModifier implements SpecializedInterface
 {
@@ -27,6 +32,7 @@ class CoverModifier extends GenericCoverModifier implements SpecializedInterface
      *
      * @throws ModifierException
      * @throws DriverException
+     * @throws InvalidArgumentException
      */
     public function apply(ImageInterface $image): ImageInterface
     {
@@ -40,6 +46,27 @@ class CoverModifier extends GenericCoverModifier implements SpecializedInterface
             );
         }
 
+        $core = $image->core();
+        $stash = $core instanceof Core ? $core->stashedSource() : null;
+        $isCenter = Alignment::create($this->alignment) === Alignment::CENTER;
+
+        if ($stash !== null && $isCenter && !$image->isAnimated()) {
+            try {
+                $native = $this->normalizeBands(
+                    $this->coverFromStash($stash, $resize, $image->colorspace())
+                );
+            } catch (VipsException $e) {
+                throw new ModifierException(
+                    'Failed to apply ' . self::class . ', unable to process resizing',
+                    previous: $e
+                );
+            }
+
+            $core->setNative($native);
+
+            return $image;
+        }
+
         $frames = [];
         foreach ($image as $frame) {
             $native = $this->cropResizeFrame($frame, $crop, $resize, $image->colorspace());
@@ -49,6 +76,48 @@ class CoverModifier extends GenericCoverModifier implements SpecializedInterface
         $image->core()->setNative(
             Core::replaceFrames($image->core()->native(), $frames)
         );
+
+        return $image;
+    }
+
+    /**
+     * @throws VipsException
+     */
+    private function coverFromStash(
+        PathSource|BufferSource $stash,
+        SizeInterface $resize,
+        ColorspaceInterface $colorspace,
+    ): VipsImage {
+        $options = [
+            'height' => $resize->height(),
+            'crop' => Interesting::CENTRE,
+            'no_rotate' => true,
+        ];
+
+        $interpretation = ColorProcessor::colorspaceToInterpretation($colorspace);
+        if (in_array($interpretation, [Interpretation::CMYK, Interpretation::HSV], true)) {
+            $options['export-profile'] = $interpretation;
+        }
+
+        // stash->optionString intentionally not forwarded; thumbnail* is
+        // single-frame and n=-1 fails on single-frame loaders like pngload.
+        return $stash instanceof PathSource
+            ? VipsImage::thumbnail($stash->path, $resize->width(), $options)
+            : VipsImage::thumbnail_buffer($stash->buffer, $resize->width(), $options);
+    }
+
+    /**
+     * Re-apply the SRGB-3-band -> 4-band bandjoin that NativeObjectDecoder
+     * applies on first decode, so the post-thumbnail image's bandcount
+     * matches what the rest of the pipeline expects.
+     *
+     * @throws VipsException
+     */
+    private function normalizeBands(VipsImage $image): VipsImage
+    {
+        if ($image->interpretation === Interpretation::SRGB && $image->bands === 3) {
+            return $image->bandjoin_const(255);
+        }
 
         return $image;
     }
