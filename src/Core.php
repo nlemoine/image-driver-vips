@@ -8,6 +8,7 @@ use ArrayIterator;
 use Intervention\Image\Collection;
 use Intervention\Image\Drivers\Vips\Source\BufferSource;
 use Intervention\Image\Drivers\Vips\Source\PathSource;
+use Intervention\Image\Drivers\Vips\Traits\CanNormalizeBands;
 use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\ImageException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
@@ -16,6 +17,7 @@ use Intervention\Image\Interfaces\CollectionInterface;
 use Intervention\Image\Interfaces\CoreInterface;
 use Intervention\Image\Interfaces\FrameInterface;
 use Iterator;
+use Jcupitt\Vips\Access;
 use Jcupitt\Vips\Exception as VipsException;
 use Jcupitt\Vips\Image as VipsImage;
 use Traversable;
@@ -25,6 +27,8 @@ use Traversable;
  */
 class Core implements CoreInterface, Iterator
 {
+    use CanNormalizeBands;
+
     /**
      * Number of operations that may be chained onto the image before its
      * pipeline is rendered into memory.
@@ -617,5 +621,42 @@ class Core implements CoreInterface, Iterator
         }
 
         return $debug;
+    }
+
+    /**
+     * Clone instance
+     *
+     * The vips image is immutable, so sharing it with the clone is fine on
+     * its own. What is not is the pipeline behind a decoded image: the
+     * decoders open the source for a single sequential pass, and only one of
+     * the two images could walk it. While the stash is in place the clone
+     * reopens the source instead, a fresh pipeline at no raster cost. Once
+     * the stash is gone the vips image is shared, and if it is still
+     * sequential the first of the two images to be evaluated consumes it.
+     * Core::ensureInMemory() before cloning renders it once for both.
+     *
+     * @throws DriverException
+     */
+    public function __clone(): void
+    {
+        $this->meta = clone $this->meta;
+
+        if ($this->stashedSource === null) {
+            return;
+        }
+
+        try {
+            $this->vipsImage = $this->normalizeBands(
+                $this->stashedSource instanceof PathSource
+                    ? VipsImage::newFromFile($this->stashedSource->pathWithOptions(), ['access' => Access::SEQUENTIAL])
+                    : VipsImage::newFromBuffer(
+                        $this->stashedSource->buffer,
+                        $this->stashedSource->optionString,
+                        ['access' => Access::SEQUENTIAL],
+                    ),
+            );
+        } catch (VipsException $e) {
+            throw new DriverException('Failed to reopen the image source for the clone', previous: $e);
+        }
     }
 }

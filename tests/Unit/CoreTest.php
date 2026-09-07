@@ -219,6 +219,97 @@ class CoreTest extends BaseTestCase
         $this->assertTrue((clone $core)->metaStripped());
     }
 
+    public function testCloneGetsItsOwnMetaCollection(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $clone = clone $core;
+
+        $clone->meta()->set('foo', 'bar');
+
+        $this->assertFalse($core->meta()->has('foo'));
+    }
+
+    /**
+     * The decoders open the source for a single sequential pass. A clone that
+     * shared that pipeline would leave only one of the two images encodable,
+     * the other fails with an out of order read.
+     */
+    public function testCloneOfDecodedImageEncodesAlongsideTheOriginal(): void
+    {
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($this->getTestResourceData('test.jpg'));
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    public function testCloneOfImageDecodedFromPathEncodesAlongsideTheOriginal(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    /**
+     * The decoder adds an alpha band to a 3-band sRGB source, the clone has
+     * to carry it too.
+     */
+    public function testCloneOfDecodedImageKeepsTheAlphaBand(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $this->assertSame(4, $image->core()->native()->bands);
+        $this->assertSame(4, $clone->core()->native()->bands);
+    }
+
+    public function testCloneOfDecodedAnimationKeepsItsFrames(): void
+    {
+        $image = $this->readTestImage('animation.gif');
+        $clone = clone $image;
+
+        $this->assertSame(8, $image->count());
+        $this->assertSame(8, $clone->count());
+        // n-pages counts the pages of the file whether they were loaded or
+        // not, the height is what tells the frames apart
+        $this->assertSame($image->core()->native()->height, $clone->core()->native()->height);
+    }
+
+    /**
+     * The clone keeps the stash so the resize modifiers still get their
+     * shrink on load path.
+     */
+    public function testCloneKeepsTheStashedSource(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $stash = new PathSource($this->getTestResourcePath('test.jpg'));
+        $core->setStashedSource($stash);
+
+        $this->assertSame($stash, (clone $core)->stashedSource());
+    }
+
+    /**
+     * Without a stash the clone shares the vips image, which is fine once it
+     * has been rendered into memory.
+     */
+    public function testCloneOfImageRenderedInMemoryEncodesAlongsideTheOriginal(): void
+    {
+        $image = $this->readTestImage('test.jpg')->flip();
+        $this->assertNull($image->core()->stashedSource());
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
     public function testSetNativeLeavesThePipelineLazyBelowTheOperationLimit(): void
     {
         $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
