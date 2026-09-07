@@ -5,17 +5,22 @@ declare(strict_types=1);
 namespace Intervention\Image\Drivers\Vips\Tests\Unit;
 
 use Intervention\Image\Drivers\Vips\Core;
+use Intervention\Image\Drivers\Vips\Decoders\FilePathImageDecoder;
 use Intervention\Image\Drivers\Vips\Driver;
 use Intervention\Image\Drivers\Vips\Frame;
 use Intervention\Image\Drivers\Vips\Source\BufferSource;
 use Intervention\Image\Drivers\Vips\Source\PathSource;
 use Intervention\Image\Drivers\Vips\Tests\BaseTestCase;
+use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
 use Intervention\Image\ImageManager;
 use Intervention\Image\Interfaces\AnimationFactoryInterface;
 use Intervention\Image\Interfaces\FrameInterface;
+use Jcupitt\Vips\BandFormat;
 use Jcupitt\Vips\Image as VipsImage;
+use Jcupitt\Vips\Interpretation;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 #[CoversClass(Core::class)]
 class CoreTest extends BaseTestCase
@@ -293,6 +298,58 @@ class CoreTest extends BaseTestCase
         $this->assertSame(4, $clone->core()->native()->bands);
     }
 
+    /**
+     * The decoder converts a grayscale source to sRGB. The clone has to come
+     * back the same way, and encodable alongside the original.
+     */
+    #[DataProvider('grayscaleSourcesProvider')]
+    public function testCloneOfDecodedGrayscaleImageEncodesAlongsideTheOriginal(string $filename): void
+    {
+        $image = $this->readTestImage($filename);
+        $clone = clone $image;
+
+        $this->assertSame(Interpretation::SRGB, $clone->core()->native()->interpretation);
+        $this->assertSame(4, $clone->core()->native()->bands);
+
+        $encodedClone = $clone->encodeUsingFileExtension('png');
+        $encodedImage = $image->encodeUsingFileExtension('png');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function grayscaleSourcesProvider(): array
+    {
+        return [
+            'jpeg' => ['grayscale.jpg'],
+            'png' => ['grayscale.png'],
+            'png with alpha' => ['grayscale-alpha.png'],
+        ];
+    }
+
+    public function testCloneOfDecodedGrey16ImageEncodesAlongsideTheOriginal(): void
+    {
+        $bytes = VipsImage::black(8, 8)
+            ->add(30000)
+            ->cast(BandFormat::USHORT)
+            ->copy(['interpretation' => Interpretation::GREY16])
+            ->writeToBuffer('.png');
+        $this->assertSame(Interpretation::GREY16, VipsImage::newFromBuffer($bytes)->interpretation);
+
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($bytes);
+        $clone = clone $image;
+
+        $this->assertSame($image->core()->native()->interpretation, $clone->core()->native()->interpretation);
+        $this->assertSame($image->core()->native()->bands, $clone->core()->native()->bands);
+
+        $encodedClone = $clone->encodeUsingFileExtension('png');
+        $encodedImage = $image->encodeUsingFileExtension('png');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
     public function testCloneOfDecodedAnimationKeepsItsFrames(): void
     {
         $image = $this->readTestImage('animation.gif');
@@ -303,6 +360,39 @@ class CoreTest extends BaseTestCase
         // n-pages counts the pages of the file whether they were loaded or
         // not, the height is what tells the frames apart
         $this->assertSame($image->core()->native()->height, $clone->core()->native()->height);
+    }
+
+    public function testCloneOfAnimationDecodedFromBinaryKeepsItsFrames(): void
+    {
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($this->getTestResourceData('animation.gif'));
+        $clone = clone $image;
+
+        $this->assertSame(8, $clone->count());
+        $this->assertSame($image->core()->native()->height, $clone->core()->native()->height);
+    }
+
+    public function testModifyingTheCloneLeavesTheOriginalUntouched(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $clone->flip();
+
+        $original = (string) $image->encodeUsingFileExtension('png');
+        $this->assertSame((string) $this->readTestImage('test.jpg')->encodeUsingFileExtension('png'), $original);
+        $this->assertNotSame((string) $clone->encodeUsingFileExtension('png'), $original);
+    }
+
+    public function testCloneThrowsWhenTheSourceFileIsGone(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'vips');
+        $this->assertNotFalse($path);
+        copy($this->getTestResourcePath('test.jpg'), $path);
+        $image = (new Driver())->decodeImage($path, [FilePathImageDecoder::class]);
+        unlink($path);
+
+        $this->expectException(DriverException::class);
+        clone $image;
     }
 
     /**

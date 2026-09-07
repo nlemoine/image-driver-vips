@@ -8,7 +8,7 @@ use ArrayIterator;
 use Intervention\Image\Collection;
 use Intervention\Image\Drivers\Vips\Source\BufferSource;
 use Intervention\Image\Drivers\Vips\Source\PathSource;
-use Intervention\Image\Drivers\Vips\Traits\CanNormalizeBands;
+use Intervention\Image\Drivers\Vips\Traits\CanNormalizeSource;
 use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\ImageException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
@@ -27,7 +27,7 @@ use Traversable;
  */
 class Core implements CoreInterface, Iterator
 {
-    use CanNormalizeBands;
+    use CanNormalizeSource;
 
     /**
      * Number of operations that may be chained onto the image before its
@@ -615,6 +615,26 @@ class Core implements CoreInterface, Iterator
     }
 
     /**
+     * Reopen the stashed source the way the decoder loaded it: the same
+     * option string, sequential access, and the decoder's normalisation on
+     * top.
+     *
+     * @throws DriverException
+     */
+    private function reopenStashedSource(PathSource|BufferSource $source): VipsImage
+    {
+        try {
+            $vipsImage = $source instanceof PathSource
+                ? VipsImage::newFromFile($source->pathWithOptions(), ['access' => Access::SEQUENTIAL])
+                : VipsImage::newFromBuffer($source->buffer, $source->optionString, ['access' => Access::SEQUENTIAL]);
+
+            return $this->normalizeSource($vipsImage);
+        } catch (VipsException $e) {
+            throw new DriverException('Failed to reopen the image source for the clone', previous: $e);
+        }
+    }
+
+    /**
      * Show debug info for the current image
      *
      * @throws DriverException
@@ -645,14 +665,18 @@ class Core implements CoreInterface, Iterator
     /**
      * Clone instance
      *
-     * The vips image is immutable, so sharing it with the clone is fine on
+     * Operations on a vips image return new images and the core itself never
+     * writes to the one it holds, so sharing it with the clone is fine on
      * its own. What is not is the pipeline behind a decoded image: the
      * decoders open the source for a single sequential pass, and only one of
      * the two images could walk it. While the stash is in place the clone
-     * reopens the source instead, a fresh pipeline at no raster cost. Once
-     * the stash is gone the vips image is shared, and if it is still
-     * sequential the first of the two images to be evaluated consumes it.
-     * Core::ensureInMemory() before cloning renders it once for both.
+     * reopens the source instead, a fresh pipeline at no raster cost. That
+     * is a header read, or for a buffer a copy of the encoded bytes into
+     * memory libvips owns, and it can fail: a file that went away since the
+     * decode throws here rather than at the encode. Once the stash is gone
+     * the vips image is shared, and if it is still sequential the first of
+     * the two images to be evaluated consumes it. Core::ensureInMemory()
+     * before cloning renders it once for both.
      *
      * @throws DriverException
      */
@@ -660,22 +684,9 @@ class Core implements CoreInterface, Iterator
     {
         $this->meta = clone $this->meta;
 
-        if ($this->stashedSource === null) {
-            return;
-        }
-
-        try {
-            $this->vipsImage = $this->normalizeBands(
-                $this->stashedSource instanceof PathSource
-                    ? VipsImage::newFromFile($this->stashedSource->pathWithOptions(), ['access' => Access::SEQUENTIAL])
-                    : VipsImage::newFromBuffer(
-                        $this->stashedSource->buffer,
-                        $this->stashedSource->optionString,
-                        ['access' => Access::SEQUENTIAL],
-                    ),
-            );
-        } catch (VipsException $e) {
-            throw new DriverException('Failed to reopen the image source for the clone', previous: $e);
+        if ($this->stashedSource !== null) {
+            $this->vipsImage = $this->reopenStashedSource($this->stashedSource);
+            $this->chainedOperations = 0;
         }
     }
 }
