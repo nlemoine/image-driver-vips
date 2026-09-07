@@ -182,6 +182,30 @@ class CoreTest extends BaseTestCase
         $this->assertNull($core->stashedSource());
     }
 
+    public function testEmptyClearsTheStashedSource(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $core->setStashedSource(new PathSource($this->getTestResourcePath('test.jpg')));
+
+        $core->empty();
+
+        $this->assertNull($core->stashedSource());
+    }
+
+    /**
+     * Left in place, the stash would let a clone bring the emptied source back.
+     */
+    public function testCloneOfEmptiedCoreIsEmpty(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $image->core()->empty();
+
+        $clone = clone $image;
+
+        $this->assertSame(1, $clone->core()->native()->width);
+        $this->assertSame(1, $clone->core()->native()->height);
+    }
+
     public function testMetaStrippedIsFalseByDefault(): void
     {
         $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));

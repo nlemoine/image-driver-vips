@@ -498,10 +498,21 @@ class Core implements CoreInterface, Iterator
      * {@inheritdoc}
      *
      * @see CollectionInterface::empty()
+     *
+     * @throws DriverException
      */
     public function empty(): CollectionInterface
     {
-        $this->vipsImage = VipsImage::black(1, 1)->cast($this->vipsImage->format);
+        try {
+            $empty = VipsImage::black(1, 1)->cast($this->vipsImage->format);
+        } catch (VipsException $e) {
+            throw new DriverException('Failed to empty image core', previous: $e);
+        }
+
+        // this also clears the stashed source, a clone reopens it and would
+        // otherwise bring the emptied source back
+        // @phpstan-ignore missingType.checkedException
+        $this->setNative($empty);
 
         return $this;
     }
