@@ -406,10 +406,18 @@ class Core implements CoreInterface, Iterator
     public function setLoops(int $loops): CoreInterface
     {
         try {
-            $this->vipsImage->set('loop', $loops);
+            // work on a copy, the vips image is shared with any clone of the
+            // image and setting the field in place would change both
+            $native = $this->vipsImage->copy();
+            $native->set('loop', $loops);
         } catch (VipsException $e) {
             throw new DriverException('Failed to set loop count', previous: $e);
         }
+
+        // this also clears the stashed source, a clone reopens it and would
+        // otherwise come back with the loop count of the file
+        // @phpstan-ignore missingType.checkedException
+        $this->setNative($native);
 
         return $this;
     }

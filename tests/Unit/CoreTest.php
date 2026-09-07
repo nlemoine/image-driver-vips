@@ -310,6 +310,25 @@ class CoreTest extends BaseTestCase
         $this->assertSame((string) $encodedClone, (string) $encodedImage);
     }
 
+    public function testSetLoopsOnCloneLeavesTheOriginalUntouched(): void
+    {
+        $this->assertSame(0, $this->core->loops());
+        $clone = clone $this->core;
+
+        $clone->setLoops(7);
+
+        $this->assertSame(7, $clone->loops());
+        $this->assertSame(0, $this->core->loops());
+    }
+
+    public function testCloneOfDecodedAnimationKeepsTheLoopCountSetOnTheOriginal(): void
+    {
+        $image = $this->readTestImage('animation.gif');
+        $image->setLoops(5);
+
+        $this->assertSame(5, (clone $image)->loops());
+    }
+
     public function testSetNativeLeavesThePipelineLazyBelowTheOperationLimit(): void
     {
         $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
