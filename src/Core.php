@@ -8,6 +8,7 @@ use ArrayIterator;
 use Intervention\Image\Collection;
 use Intervention\Image\Drivers\Vips\Source\BufferSource;
 use Intervention\Image\Drivers\Vips\Source\PathSource;
+use Intervention\Image\Drivers\Vips\Traits\CanNormalizeSource;
 use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\ImageException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
@@ -16,6 +17,7 @@ use Intervention\Image\Interfaces\CollectionInterface;
 use Intervention\Image\Interfaces\CoreInterface;
 use Intervention\Image\Interfaces\FrameInterface;
 use Iterator;
+use Jcupitt\Vips\Access;
 use Jcupitt\Vips\Exception as VipsException;
 use Jcupitt\Vips\Image as VipsImage;
 use Traversable;
@@ -25,6 +27,8 @@ use Traversable;
  */
 class Core implements CoreInterface, Iterator
 {
+    use CanNormalizeSource;
+
     /**
      * Number of operations that may be chained onto the image before its
      * pipeline is rendered into memory.
@@ -416,10 +420,18 @@ class Core implements CoreInterface, Iterator
     public function setLoops(int $loops): CoreInterface
     {
         try {
-            $this->vipsImage->set('loop', $loops);
+            // work on a copy, the vips image is shared with any clone of the
+            // image and setting the field in place would change both
+            $native = $this->vipsImage->copy();
+            $native->set('loop', $loops);
         } catch (VipsException $e) {
             throw new DriverException('Failed to set loop count', previous: $e);
         }
+
+        // this also clears the stashed source, a clone reopens it and would
+        // otherwise come back with the loop count of the file
+        // @phpstan-ignore missingType.checkedException
+        $this->setNative($native);
 
         return $this;
     }
@@ -500,10 +512,21 @@ class Core implements CoreInterface, Iterator
      * {@inheritdoc}
      *
      * @see CollectionInterface::empty()
+     *
+     * @throws DriverException
      */
     public function empty(): CollectionInterface
     {
-        $this->vipsImage = VipsImage::black(1, 1)->cast($this->vipsImage->format);
+        try {
+            $empty = VipsImage::black(1, 1)->cast($this->vipsImage->format);
+        } catch (VipsException $e) {
+            throw new DriverException('Failed to empty image core', previous: $e);
+        }
+
+        // this also clears the stashed source, a clone reopens it and would
+        // otherwise bring the emptied source back
+        // @phpstan-ignore missingType.checkedException
+        $this->setNative($empty);
 
         return $this;
     }
@@ -606,6 +629,26 @@ class Core implements CoreInterface, Iterator
     }
 
     /**
+     * Reopen the stashed source the way the decoder loaded it: the same
+     * option string, sequential access, and the decoder's normalisation on
+     * top.
+     *
+     * @throws DriverException
+     */
+    private function reopenStashedSource(PathSource|BufferSource $source): VipsImage
+    {
+        try {
+            $vipsImage = $source instanceof PathSource
+                ? VipsImage::newFromFile($source->pathWithOptions(), ['access' => Access::SEQUENTIAL])
+                : VipsImage::newFromBuffer($source->buffer, $source->optionString, ['access' => Access::SEQUENTIAL]);
+
+            return $this->normalizeSource($vipsImage);
+        } catch (VipsException $e) {
+            throw new DriverException('Failed to reopen the image source for the clone', previous: $e);
+        }
+    }
+
+    /**
      * Show debug info for the current image
      *
      * @throws DriverException
@@ -631,5 +674,33 @@ class Core implements CoreInterface, Iterator
         }
 
         return $debug;
+    }
+
+    /**
+     * Clone instance
+     *
+     * Operations on a vips image return new images and the core itself never
+     * writes to the one it holds, so sharing it with the clone is fine on
+     * its own. What is not is the pipeline behind a decoded image: the
+     * decoders open the source for a single sequential pass, and only one of
+     * the two images could walk it. While the stash is in place the clone
+     * reopens the source instead, a fresh pipeline at no raster cost. That
+     * is a header read, or for a buffer a copy of the encoded bytes into
+     * memory libvips owns, and it can fail: a file that went away since the
+     * decode throws here rather than at the encode. Once the stash is gone
+     * the vips image is shared, and if it is still sequential the first of
+     * the two images to be evaluated consumes it. Core::ensureInMemory()
+     * before cloning renders it once for both.
+     *
+     * @throws DriverException
+     */
+    public function __clone(): void
+    {
+        $this->meta = clone $this->meta;
+
+        if ($this->stashedSource !== null) {
+            $this->vipsImage = $this->reopenStashedSource($this->stashedSource);
+            $this->chainedOperations = 0;
+        }
     }
 }
