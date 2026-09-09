@@ -94,6 +94,34 @@ class CoreTest extends BaseTestCase
         $this->assertInstanceOf(Core::class, $result);
     }
 
+    /**
+     * A still image carries no loop field. GD and Imagick report 0 there,
+     * so does this core.
+     */
+    public function testLoopsIsZeroForAStillImage(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+
+        $this->assertSame(0, $core->loops());
+    }
+
+    public function testImageLoopsIsZeroForAStillImage(): void
+    {
+        $this->assertSame(0, $this->readTestImage('test.jpg')->loops());
+        $this->assertSame(0, ImageManager::usingDriver(Driver::class)->createImage(10, 10)->loops());
+    }
+
+    /**
+     * The field is absent until set, the guard must not shadow the value
+     * once it is there.
+     */
+    public function testSetLoopsOnAStillImageThenGet(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+
+        $this->assertSame(7, $core->setLoops(7)->loops());
+    }
+
     public function testHas(): void
     {
         $this->assertTrue($this->core->has(0));

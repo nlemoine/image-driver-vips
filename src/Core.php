@@ -386,6 +386,12 @@ class Core implements CoreInterface, Iterator
     public function loops(): int
     {
         try {
+            // an image decoded from a still source carries no loop field, GD
+            // and Imagick report 0 there
+            if ($this->vipsImage->getType('loop') === 0) {
+                return 0;
+            }
+
             return (int) $this->vipsImage->get('loop');
         } catch (VipsException $e) {
             throw new DriverException('Failed to load loop count', previous: $e);
