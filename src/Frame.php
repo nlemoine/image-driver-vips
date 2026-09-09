@@ -16,6 +16,17 @@ use Jcupitt\Vips\Image as VipsImage;
 class Frame implements FrameInterface
 {
     /**
+     * The offset is kept on the frame, as the GD driver does, not on the
+     * vips image. libvips has xoffset and yoffset header properties, but
+     * they are pipeline bookkeeping: crop, extract_area, flip or rotate
+     * overwrite them with values of their own, and no encoder writes them
+     * out. Nothing in the driver reads the offset either, it is reported
+     * as set.
+     */
+    protected int $offsetLeft = 0;
+    protected int $offsetTop = 0;
+
+    /**
      * Create new frame instance
      *
      * @return void
@@ -133,8 +144,8 @@ class Frame implements FrameInterface
      */
     public function setOffset(int $left, int $top): FrameInterface
     {
-        $this->setOffsetLeft($left);
-        $this->setOffsetTop($top);
+        $this->offsetLeft = $left;
+        $this->offsetTop = $top;
 
         return $this;
     }
@@ -146,7 +157,7 @@ class Frame implements FrameInterface
      */
     public function offsetLeft(): int
     {
-        return $this->native()->get('xoffset');
+        return $this->offsetLeft;
     }
 
     /**
@@ -156,7 +167,7 @@ class Frame implements FrameInterface
      */
     public function setOffsetLeft(int $offset): FrameInterface
     {
-        $this->native()->set('xoffset', $offset);
+        $this->offsetLeft = $offset;
 
         return $this;
     }
@@ -168,7 +179,7 @@ class Frame implements FrameInterface
      */
     public function offsetTop(): int
     {
-        return $this->native()->get('yoffset');
+        return $this->offsetTop;
     }
 
     /**
@@ -178,7 +189,7 @@ class Frame implements FrameInterface
      */
     public function setOffsetTop(int $offset): FrameInterface
     {
-        $this->native()->set('yoffset', $offset);
+        $this->offsetTop = $offset;
 
         return $this;
     }

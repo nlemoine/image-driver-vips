@@ -160,6 +160,17 @@ class CoreTest extends BaseTestCase
         }
     }
 
+    /**
+     * frame() extracts with extract_area(), which records the extract origin
+     * in the vips image's yoffset. That is not the frame's offset, GD and
+     * Imagick report 0 here.
+     */
+    public function testFrameOffsetIsZero(): void
+    {
+        $this->assertSame(0, $this->core->frame(1)->offsetLeft());
+        $this->assertSame(0, $this->core->frame(1)->offsetTop());
+    }
+
     public function testFrameDelay(): void
     {
         $this->assertEquals(0.3, $this->core->frame(0)->delay());
