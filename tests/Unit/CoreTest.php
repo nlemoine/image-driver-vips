@@ -16,6 +16,7 @@ use Intervention\Image\Exceptions\InvalidArgumentException;
 use Intervention\Image\ImageManager;
 use Intervention\Image\Interfaces\AnimationFactoryInterface;
 use Intervention\Image\Interfaces\FrameInterface;
+use Jcupitt\Vips\Config;
 use Jcupitt\Vips\BandFormat;
 use Jcupitt\Vips\Image as VipsImage;
 use Jcupitt\Vips\Interpretation;
@@ -546,5 +547,70 @@ class CoreTest extends BaseTestCase
 
         $this->assertColor(255, 0, 0, 255, $image->colorAt(2, 2));
         $this->assertColor(0, 0, 255, 255, $image->colorAt(10, 10));
+    }
+
+    /**
+     * arrayjoin() comes out of the libvips operation cache: the same frames
+     * give the same image again, and the fields set on it would reach every
+     * core built from them.
+     */
+    public function testCreateFromFramesLeavesAnEarlierCoreAlone(): void
+    {
+        $this->pinOperationCache();
+        $frames = [
+            new Frame($this->vipsImage(10, 10, [255, 0, 0]), 0.1),
+            new Frame($this->vipsImage(10, 10, [0, 255, 0]), 0.1),
+        ];
+        $core = Core::createFromFrames($frames, 3);
+
+        $other = Core::createFromFrames($frames, 9);
+
+        $this->assertSame(9, $other->loops());
+        $this->assertSame(3, $core->loops());
+    }
+
+    /**
+     * Same natives, other delays: the frames differ, the arrayjoin() call
+     * does not.
+     */
+    public function testCreateFromFramesWithOtherDelaysLeavesAnEarlierCoreAlone(): void
+    {
+        $this->pinOperationCache();
+        $red = $this->vipsImage(10, 10, [255, 0, 0]);
+        $green = $this->vipsImage(10, 10, [0, 255, 0]);
+        $core = Core::createFromFrames([new Frame($red, 0.1), new Frame($green, 0.1)]);
+
+        $other = Core::createFromFrames([new Frame($red, 0.5), new Frame($green, 0.5)]);
+
+        $this->assertEquals(0.5, $other->frame(0)->delay());
+        $this->assertEquals(0.1, $core->frame(0)->delay());
+    }
+
+    /**
+     * The extracted area comes out of the operation cache too, a later
+     * extraction of the same area would get the fields frame() sets.
+     */
+    public function testFrameLeavesTheExtractedAreaAlone(): void
+    {
+        $this->pinOperationCache();
+        $native = $this->core->native();
+        $height = $native->get('page-height');
+        $this->core->frame(1);
+
+        $area = $native->extract_area(0, $height, $native->width, $height);
+
+        $this->assertSame(3, $area->get('n-pages'));
+        $this->assertSame([300, 300, 300], $area->get('delay'));
+    }
+
+    /**
+     * The tests on the operation cache rely on libvips handing the same
+     * image back for the same call. With the cache switched off they would
+     * pass on the very code they guard. 1000 operations is the libvips
+     * default.
+     */
+    private function pinOperationCache(): void
+    {
+        Config::cacheSetMax(1000);
     }
 }

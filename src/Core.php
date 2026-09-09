@@ -51,7 +51,9 @@ class Core implements CoreInterface, Iterator
      *
      * This counts calls, not libvips nodes, so it is a bound rather than a
      * measurement. A modifier that chains several nodes per call spends the
-     * budget faster than one node per call.
+     * budget faster than one node per call. The frame round trip of add()
+     * and slice() is the deepest, four nodes per call: extract_area() and
+     * arrayjoin(), each followed by the header copy their fields go on.
      */
     public const MAX_CHAINED_OPERATIONS = 32;
 
@@ -86,7 +88,11 @@ class Core implements CoreInterface, Iterator
         }
 
         try {
-            $vipsImage = VipsImage::arrayjoin($natives, ['across' => 1]);
+            // the joined image comes out of the libvips operation cache, the
+            // same frames give the same image again. Set the fields on a
+            // private copy of the header, or they reach every core built from
+            // these frames
+            $vipsImage = VipsImage::arrayjoin($natives, ['across' => 1])->copy();
             $vipsImage->set('delay', $delay);
             $vipsImage->set('loop', $loops);
             $vipsImage->set('n-pages', count($frames));
@@ -341,13 +347,15 @@ class Core implements CoreInterface, Iterator
             $height = $this->vipsImage->getType('page-height') === 0 ?
                 $this->vipsImage->height : $this->vipsImage->get('page-height');
 
-            // extract only certain frame
+            // extract only certain frame, on a private copy of the header: the
+            // extracted area comes out of the libvips operation cache and a
+            // later extraction of the same area would get the fields set below
             $vipsImage = $this->vipsImage->extract_area(
                 0,
                 $height * $position,
                 $this->vipsImage->width,
                 $height,
-            );
+            )->copy();
 
             $vipsImage->set('n-pages', 1);
             if (!is_null($delay)) {
