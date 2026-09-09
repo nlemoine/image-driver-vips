@@ -5,17 +5,22 @@ declare(strict_types=1);
 namespace Intervention\Image\Drivers\Vips\Tests\Unit;
 
 use Intervention\Image\Drivers\Vips\Core;
+use Intervention\Image\Drivers\Vips\Decoders\FilePathImageDecoder;
 use Intervention\Image\Drivers\Vips\Driver;
 use Intervention\Image\Drivers\Vips\Frame;
 use Intervention\Image\Drivers\Vips\Source\BufferSource;
 use Intervention\Image\Drivers\Vips\Source\PathSource;
 use Intervention\Image\Drivers\Vips\Tests\BaseTestCase;
+use Intervention\Image\Exceptions\DriverException;
 use Intervention\Image\Exceptions\InvalidArgumentException;
 use Intervention\Image\ImageManager;
 use Intervention\Image\Interfaces\AnimationFactoryInterface;
 use Intervention\Image\Interfaces\FrameInterface;
+use Jcupitt\Vips\BandFormat;
 use Jcupitt\Vips\Image as VipsImage;
+use Jcupitt\Vips\Interpretation;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 #[CoversClass(Core::class)]
 class CoreTest extends BaseTestCase
@@ -221,6 +226,30 @@ class CoreTest extends BaseTestCase
         $this->assertNull($core->stashedSource());
     }
 
+    public function testEmptyClearsTheStashedSource(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $core->setStashedSource(new PathSource($this->getTestResourcePath('test.jpg')));
+
+        $core->empty();
+
+        $this->assertNull($core->stashedSource());
+    }
+
+    /**
+     * Left in place, the stash would let a clone bring the emptied source back.
+     */
+    public function testCloneOfEmptiedCoreIsEmpty(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $image->core()->empty();
+
+        $clone = clone $image;
+
+        $this->assertSame(1, $clone->core()->native()->width);
+        $this->assertSame(1, $clone->core()->native()->height);
+    }
+
     public function testMetaStrippedIsFalseByDefault(): void
     {
         $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
@@ -256,6 +285,201 @@ class CoreTest extends BaseTestCase
         $core->setMetaStripped();
 
         $this->assertTrue((clone $core)->metaStripped());
+    }
+
+    public function testCloneGetsItsOwnMetaCollection(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $clone = clone $core;
+
+        $clone->meta()->set('foo', 'bar');
+
+        $this->assertFalse($core->meta()->has('foo'));
+    }
+
+    /**
+     * The decoders open the source for a single sequential pass. A clone that
+     * shared that pipeline would leave only one of the two images encodable,
+     * the other fails with an out of order read.
+     */
+    public function testCloneOfDecodedImageEncodesAlongsideTheOriginal(): void
+    {
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($this->getTestResourceData('test.jpg'));
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    public function testCloneOfImageDecodedFromPathEncodesAlongsideTheOriginal(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    /**
+     * The decoder adds an alpha band to a 3-band sRGB source, the clone has
+     * to carry it too.
+     */
+    public function testCloneOfDecodedImageKeepsTheAlphaBand(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $this->assertSame(4, $image->core()->native()->bands);
+        $this->assertSame(4, $clone->core()->native()->bands);
+    }
+
+    /**
+     * The decoder converts a grayscale source to sRGB. The clone has to come
+     * back the same way, and encodable alongside the original.
+     */
+    #[DataProvider('grayscaleSourcesProvider')]
+    public function testCloneOfDecodedGrayscaleImageEncodesAlongsideTheOriginal(string $filename): void
+    {
+        $image = $this->readTestImage($filename);
+        $clone = clone $image;
+
+        $this->assertSame(Interpretation::SRGB, $clone->core()->native()->interpretation);
+        $this->assertSame(4, $clone->core()->native()->bands);
+
+        $encodedClone = $clone->encodeUsingFileExtension('png');
+        $encodedImage = $image->encodeUsingFileExtension('png');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function grayscaleSourcesProvider(): array
+    {
+        return [
+            'jpeg' => ['grayscale.jpg'],
+            'png' => ['grayscale.png'],
+            'png with alpha' => ['grayscale-alpha.png'],
+        ];
+    }
+
+    public function testCloneOfDecodedGrey16ImageEncodesAlongsideTheOriginal(): void
+    {
+        $bytes = VipsImage::black(8, 8)
+            ->add(30000)
+            ->cast(BandFormat::USHORT)
+            ->copy(['interpretation' => Interpretation::GREY16])
+            ->writeToBuffer('.png');
+        $this->assertSame(Interpretation::GREY16, VipsImage::newFromBuffer($bytes)->interpretation);
+
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($bytes);
+        $clone = clone $image;
+
+        $this->assertSame($image->core()->native()->interpretation, $clone->core()->native()->interpretation);
+        $this->assertSame($image->core()->native()->bands, $clone->core()->native()->bands);
+
+        $encodedClone = $clone->encodeUsingFileExtension('png');
+        $encodedImage = $image->encodeUsingFileExtension('png');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    public function testCloneOfDecodedAnimationKeepsItsFrames(): void
+    {
+        $image = $this->readTestImage('animation.gif');
+        $clone = clone $image;
+
+        $this->assertSame(8, $image->count());
+        $this->assertSame(8, $clone->count());
+        // n-pages counts the pages of the file whether they were loaded or
+        // not, the height is what tells the frames apart
+        $this->assertSame($image->core()->native()->height, $clone->core()->native()->height);
+    }
+
+    public function testCloneOfAnimationDecodedFromBinaryKeepsItsFrames(): void
+    {
+        $image = ImageManager::usingDriver(Driver::class)->decodeBinary($this->getTestResourceData('animation.gif'));
+        $clone = clone $image;
+
+        $this->assertSame(8, $clone->count());
+        $this->assertSame($image->core()->native()->height, $clone->core()->native()->height);
+    }
+
+    public function testModifyingTheCloneLeavesTheOriginalUntouched(): void
+    {
+        $image = $this->readTestImage('test.jpg');
+        $clone = clone $image;
+
+        $clone->flip();
+
+        $original = (string) $image->encodeUsingFileExtension('png');
+        $this->assertSame((string) $this->readTestImage('test.jpg')->encodeUsingFileExtension('png'), $original);
+        $this->assertNotSame((string) $clone->encodeUsingFileExtension('png'), $original);
+    }
+
+    public function testCloneThrowsWhenTheSourceFileIsGone(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'vips');
+        $this->assertNotFalse($path);
+        copy($this->getTestResourcePath('test.jpg'), $path);
+        $image = (new Driver())->decodeImage($path, [FilePathImageDecoder::class]);
+        unlink($path);
+
+        $this->expectException(DriverException::class);
+        clone $image;
+    }
+
+    /**
+     * The clone keeps the stash so the resize modifiers still get their
+     * shrink on load path.
+     */
+    public function testCloneKeepsTheStashedSource(): void
+    {
+        $core = new Core($this->vipsImage(10, 10, [255, 0, 0]));
+        $stash = new PathSource($this->getTestResourcePath('test.jpg'));
+        $core->setStashedSource($stash);
+
+        $this->assertSame($stash, (clone $core)->stashedSource());
+    }
+
+    /**
+     * Without a stash the clone shares the vips image, which is fine once it
+     * has been rendered into memory.
+     */
+    public function testCloneOfImageRenderedInMemoryEncodesAlongsideTheOriginal(): void
+    {
+        $image = $this->readTestImage('test.jpg')->flip();
+        $this->assertNull($image->core()->stashedSource());
+        $clone = clone $image;
+
+        $encodedClone = $clone->encodeUsingFileExtension('jpg');
+        $encodedImage = $image->encodeUsingFileExtension('jpg');
+
+        $this->assertSame((string) $encodedClone, (string) $encodedImage);
+    }
+
+    public function testSetLoopsOnCloneLeavesTheOriginalUntouched(): void
+    {
+        $this->assertSame(0, $this->core->loops());
+        $clone = clone $this->core;
+
+        $clone->setLoops(7);
+
+        $this->assertSame(7, $clone->loops());
+        $this->assertSame(0, $this->core->loops());
+    }
+
+    public function testCloneOfDecodedAnimationKeepsTheLoopCountSetOnTheOriginal(): void
+    {
+        $image = $this->readTestImage('animation.gif');
+        $image->setLoops(5);
+
+        $this->assertSame(5, (clone $image)->loops());
     }
 
     public function testSetNativeLeavesThePipelineLazyBelowTheOperationLimit(): void
